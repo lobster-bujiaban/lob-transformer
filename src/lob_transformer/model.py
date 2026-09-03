@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .embedding import Embedding
+from .rope import RotaryPositionEmbedding
 
 
 def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -24,6 +25,8 @@ class ModelConfig:
     def __post_init__(self) -> None:
         if self.dimensions % self.heads:
             raise ValueError("dimensions must be divisible by heads")
+        if (self.dimensions // self.heads) % 2:
+            raise ValueError("attention head dimensions must be even for RoPE")
 
 
 class TinyGPT:
@@ -34,7 +37,7 @@ class TinyGPT:
         rng = np.random.default_rng(seed)
         scale = config.dimensions ** -0.5
         self.token_embedding = Embedding(config.vocab_size, config.dimensions, rng=rng)
-        self.position_embedding = rng.normal(0, scale, (config.context_length, config.dimensions))
+        self.rope = RotaryPositionEmbedding(config.dimensions // config.heads)
         self.layers = []
         for _ in range(config.layers):
             self.layers.append({
@@ -53,6 +56,8 @@ class TinyGPT:
         q = (x @ layer["q"]).reshape(length, self.config.heads, head_size).transpose(1, 0, 2)
         k = (x @ layer["k"]).reshape(length, self.config.heads, head_size).transpose(1, 0, 2)
         v = (x @ layer["v"]).reshape(length, self.config.heads, head_size).transpose(1, 0, 2)
+        q = self.rope(q)
+        k = self.rope(k)
         scores = q @ k.transpose(0, 2, 1) / np.sqrt(head_size)
         scores = np.where(np.triu(np.ones((length, length), dtype=bool), 1), -1e9, scores)
         weights = softmax(scores, axis=-1)
@@ -63,7 +68,7 @@ class TinyGPT:
         ids = np.asarray(token_ids, dtype=np.int64)
         if ids.ndim != 1 or len(ids) > self.config.context_length:
             raise ValueError("token sequence must be one-dimensional and fit the context length")
-        x = self.token_embedding(ids) + self.position_embedding[np.arange(len(ids))]
+        x = self.token_embedding(ids)
         for layer in self.layers:
             x = x + self._attention(x, layer)
             hidden = np.maximum(0, x @ layer["up"])

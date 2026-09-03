@@ -4,6 +4,7 @@ import argparse
 
 from .embedding import Embedding
 from .model import ModelConfig, TinyGPT
+from .rope import RotaryPositionEmbedding
 from .tokenizer import CharacterTokenizer
 
 
@@ -15,6 +16,9 @@ def main() -> None:
     embedding = sub.add_parser("embedding", help="look up embedding vectors for text")
     embedding.add_argument("--text", required=True)
     embedding.add_argument("--dimensions", type=int, default=8)
+    rope = sub.add_parser("rope", help="apply rotary position embeddings to text vectors")
+    rope.add_argument("--text", required=True)
+    rope.add_argument("--dimensions", type=int, default=8)
     forward = sub.add_parser("forward", help="run a Transformer forward pass")
     forward.add_argument("--text", required=True)
     generate = sub.add_parser("generate", help="generate tokens from a prompt")
@@ -46,6 +50,18 @@ def main() -> None:
             "token_ids": prompt_ids,
             "embedding_shape": list(vectors.shape),
             "vectors": vectors.round(4).tolist(),
+        })
+        return
+    if args.command == "rope":
+        try:
+            vectors = Embedding(tokenizer.vocab_size, args.dimensions)(prompt_ids)
+            rotated = RotaryPositionEmbedding(args.dimensions)(vectors)
+        except ValueError as error:
+            parser.error(str(error))
+        print({
+            "input_shape": list(vectors.shape),
+            "output_shape": list(rotated.shape),
+            "vectors": rotated.round(4).tolist(),
         })
         return
     config = ModelConfig(vocab_size=tokenizer.vocab_size)

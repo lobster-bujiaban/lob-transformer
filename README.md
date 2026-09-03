@@ -11,6 +11,7 @@ Transformer Block、Logits 和贪心生成。当前权重为随机初始化，�
 uv run lob-transformer --help
 uv run lob-transformer tokenize --text "你好，Transformer"
 uv run lob-transformer embedding --text "你好" --dimensions 8
+uv run lob-transformer rope --text "你好" --dimensions 8
 uv run lob-transformer forward --text "你好，Transformer"
 uv run lob-transformer generate --prompt "从前有座山" --tokens 32
 ```
