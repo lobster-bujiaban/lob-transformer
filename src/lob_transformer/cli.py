@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from .embedding import Embedding
 from .model import ModelConfig, TinyGPT
 from .tokenizer import CharacterTokenizer
 
@@ -11,6 +12,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
     tokenize = sub.add_parser("tokenize", help="encode and decode text with the character tokenizer")
     tokenize.add_argument("--text", required=True)
+    embedding = sub.add_parser("embedding", help="look up embedding vectors for text")
+    embedding.add_argument("--text", required=True)
+    embedding.add_argument("--dimensions", type=int, default=8)
     forward = sub.add_parser("forward", help="run a Transformer forward pass")
     forward.add_argument("--text", required=True)
     generate = sub.add_parser("generate", help="generate tokens from a prompt")
@@ -31,6 +35,17 @@ def main() -> None:
             "token_ids": prompt_ids,
             "decoded": tokenizer.decode(prompt_ids),
             "vocab_size": tokenizer.vocab_size,
+        })
+        return
+    if args.command == "embedding":
+        try:
+            vectors = Embedding(tokenizer.vocab_size, args.dimensions)(prompt_ids)
+        except ValueError as error:
+            parser.error(str(error))
+        print({
+            "token_ids": prompt_ids,
+            "embedding_shape": list(vectors.shape),
+            "vectors": vectors.round(4).tolist(),
         })
         return
     config = ModelConfig(vocab_size=tokenizer.vocab_size)

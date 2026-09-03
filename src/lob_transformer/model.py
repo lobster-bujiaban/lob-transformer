@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .embedding import Embedding
+
 
 def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     shifted = x - np.max(x, axis=axis, keepdims=True)
@@ -31,7 +33,7 @@ class TinyGPT:
         self.config = config
         rng = np.random.default_rng(seed)
         scale = config.dimensions ** -0.5
-        self.token_embedding = rng.normal(0, scale, (config.vocab_size, config.dimensions))
+        self.token_embedding = Embedding(config.vocab_size, config.dimensions, rng=rng)
         self.position_embedding = rng.normal(0, scale, (config.context_length, config.dimensions))
         self.layers = []
         for _ in range(config.layers):
@@ -43,7 +45,7 @@ class TinyGPT:
                 "up": rng.normal(0, scale, (config.dimensions, config.dimensions * 4)),
                 "down": rng.normal(0, scale, (config.dimensions * 4, config.dimensions)),
             })
-        self.lm_head = self.token_embedding.T.copy()
+        self.lm_head = self.token_embedding.weight.T.copy()
 
     def _attention(self, x: np.ndarray, layer: dict[str, np.ndarray]) -> np.ndarray:
         length, dimensions = x.shape
@@ -61,7 +63,7 @@ class TinyGPT:
         ids = np.asarray(token_ids, dtype=np.int64)
         if ids.ndim != 1 or len(ids) > self.config.context_length:
             raise ValueError("token sequence must be one-dimensional and fit the context length")
-        x = self.token_embedding[ids] + self.position_embedding[np.arange(len(ids))]
+        x = self.token_embedding(ids) + self.position_embedding[np.arange(len(ids))]
         for layer in self.layers:
             x = x + self._attention(x, layer)
             hidden = np.maximum(0, x @ layer["up"])
