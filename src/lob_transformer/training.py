@@ -6,6 +6,16 @@ import numpy as np
 from .attention import CausalSelfAttention, softmax
 from .model import TinyGPT
 from .normalization import LayerNorm
+from .data import TextWindows
+
+
+def _sgd_step(gradients, learning_rate):
+    if not all(np.isfinite(g).all() for _, g in gradients):
+        raise ValueError("non-finite gradients; reduce learning_rate")
+    norm = np.sqrt(sum(float(np.sum(g * g)) for _, g in gradients))
+    factor = 1 / max(1.0, norm)
+    for parameter, gradient in gradients:
+        parameter -= learning_rate * factor * gradient
 
 
 def cross_entropy(logits: np.ndarray, targets: np.ndarray) -> tuple[float, np.ndarray]:
@@ -143,13 +153,59 @@ def train(model: TinyGPT, token_ids, *, steps: int = 200, learning_rate: float =
     loss, gradients = loss_and_gradients(model, inputs, targets)
     history = [loss]
     for _ in range(steps):
-        if not all(np.isfinite(g).all() for _, g in gradients):
-            raise ValueError("non-finite gradients; reduce learning_rate")
-        # Global gradient clipping keeps this simple SGD demonstration stable.
-        norm = np.sqrt(sum(float(np.sum(g * g)) for _, g in gradients))
-        factor = 1 / max(1.0, norm)
-        for parameter, gradient in gradients:
-            parameter -= learning_rate * factor * gradient
+        _sgd_step(gradients, learning_rate)
         loss, gradients = loss_and_gradients(model, inputs, targets)
         history.append(loss)
+    return history
+
+
+def batch_loss_and_gradients(model: TinyGPT, inputs, targets):
+    """Accumulate per-window gradients, averaging before clipping/updating."""
+    inputs, targets = np.asarray(inputs), np.asarray(targets)
+    if inputs.ndim != 2 or 0 in inputs.shape or targets.shape != inputs.shape:
+        raise ValueError("inputs and targets must have matching non-empty [batch, tokens] shapes")
+    accumulated = None
+    total = 0.0
+    for x, y in zip(inputs, targets):
+        loss, gradients = loss_and_gradients(model, x, y)
+        total += loss
+        if accumulated is None:
+            accumulated = [(parameter, gradient.copy()) for parameter, gradient in gradients]
+        else:
+            for (parameter, summed), (other, gradient) in zip(accumulated, gradients):
+                assert parameter is other
+                summed += gradient
+    for _, gradient in accumulated:
+        gradient /= len(inputs)
+    return total / len(inputs), accumulated
+
+
+def train_corpus(model: TinyGPT, token_ids, *, steps=200, learning_rate=0.05,
+                 batch_size=4, seed=7, progress=None):
+    """Random-window SGD; report a fixed training sample, not validation loss."""
+    if type(steps) is not int or steps <= 0:
+        raise ValueError("steps must be a positive integer")
+    if not np.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("learning_rate must be finite and positive")
+    windows = TextWindows(token_ids, model.config.context_length, seed)
+    if np.any(windows.ids < 0) or np.any(windows.ids >= model.config.vocab_size):
+        raise ValueError("corpus token ID is outside the vocabulary")
+    # Separate RNG leaves training-window sampling independent of evaluation.
+    evaluation = TextWindows(token_ids, model.config.context_length, seed + 1).sample(batch_size)
+
+    def evaluate():
+        return float(np.mean([cross_entropy(model.forward(x), y)[0]
+                              for x, y in zip(*evaluation)]))
+
+    history = [(0, evaluate())]
+    if progress:
+        progress(*history[-1])
+    for step in range(1, steps + 1):
+        inputs, targets = windows.sample(batch_size)
+        _, gradients = batch_loss_and_gradients(model, inputs, targets)
+        _sgd_step(gradients, learning_rate)
+        if step % 10 == 0 or step == steps:
+            history.append((step, evaluate()))
+            if progress:
+                progress(*history[-1])
     return history

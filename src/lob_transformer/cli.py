@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from .attention import CausalSelfAttention
+from .checkpoint import load_checkpoint, save_checkpoint
 from .embedding import Embedding
 from .model import ModelConfig, TinyGPT
 from .rope import RotaryPositionEmbedding
 from .tokenizer import CharacterTokenizer
-from .training import train
+from .training import train, train_corpus
+from .server import serve
 
 
 def main() -> None:
@@ -30,19 +33,53 @@ def main() -> None:
     generate = sub.add_parser("generate", help="generate tokens from a prompt")
     generate.add_argument("--prompt", required=True)
     generate.add_argument("--tokens", type=int, default=16)
+    generate.add_argument("--checkpoint", help="load trained weights and vocabulary")
     training = sub.add_parser("train", help="fit a short text using NumPy backpropagation and SGD")
-    training.add_argument("--text", required=True)
+    source = training.add_mutually_exclusive_group(required=True)
+    source.add_argument("--text")
+    source.add_argument("--file", help="UTF-8 corpus file; enables random-window mini-batch training")
+    training.add_argument("--batch-size", type=int, default=4)
+    training.add_argument("--context-length", type=int, default=128)
+    training.add_argument("--seed", type=int, default=7)
     training.add_argument("--steps", type=int, default=200)
     training.add_argument("--learning-rate", type=float, default=0.05)
     training.add_argument("--dimensions", type=int, default=32)
     training.add_argument("--heads", type=int, default=4)
     training.add_argument("--layers", type=int, default=2)
     training.add_argument("--tokens", type=int, default=16)
+    training.add_argument("--save", help="save weights and vocabulary to this checkpoint file")
+    serving = sub.add_parser("serve", help="serve a checkpoint over a local HTTP JSON API")
+    serving.add_argument("--checkpoint", required=True)
+    serving.add_argument("--host", default="127.0.0.1")
+    serving.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         return
+    if args.command == "serve":
+        try:
+            serve(args.checkpoint, args.host, args.port)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        return
     source_text = args.prompt if args.command == "generate" else args.text
+    if args.command == "train" and args.file:
+        try:
+            source_text = Path(args.file).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            parser.error(str(error))
+    if args.command == "generate" and args.checkpoint:
+        try:
+            if not source_text or args.tokens < 0:
+                raise ValueError("prompt must not be empty and tokens must be non-negative")
+            model, tokenizer = load_checkpoint(args.checkpoint)
+            ids = tokenizer.encode(source_text)
+            if tokenizer.UNK_ID in ids:
+                raise ValueError("prompt contains characters absent from the saved vocabulary")
+            print(tokenizer.decode(model.generate(ids, args.tokens)))
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        return
     tokenizer = CharacterTokenizer(source_text)
     prompt_ids = tokenizer.encode(source_text)
     if not prompt_ids:
@@ -99,10 +136,23 @@ def main() -> None:
             if args.tokens < 0:
                 raise ValueError("tokens must be non-negative")
             config = ModelConfig(vocab_size=tokenizer.vocab_size, dimensions=args.dimensions,
-                                 heads=args.heads, layers=args.layers)
-            model = TinyGPT(config)
-            history = train(model, prompt_ids, steps=args.steps, learning_rate=args.learning_rate)
-        except (ValueError, TypeError) as error:
+                                 heads=args.heads, layers=args.layers, context_length=args.context_length)
+            model = TinyGPT(config, seed=args.seed)
+            if args.file:
+                print({"corpus_tokens": len(prompt_ids), "vocab_size": tokenizer.vocab_size,
+                       "window_length": min(config.context_length, len(prompt_ids) - 1),
+                       "batch_size": args.batch_size}, flush=True)
+                samples = train_corpus(
+                    model, prompt_ids, steps=args.steps, learning_rate=args.learning_rate,
+                    batch_size=args.batch_size, seed=args.seed,
+                    progress=lambda step, loss: print(
+                        {"step": step, "train_sample_loss": round(loss, 6)}, flush=True))
+                history = [loss for _, loss in samples]
+            else:
+                history = train(model, prompt_ids, steps=args.steps, learning_rate=args.learning_rate)
+            if args.save:
+                save_checkpoint(args.save, model, tokenizer)
+        except (OSError, ValueError, TypeError) as error:
             parser.error(str(error))
         print({"steps": args.steps, "initial_loss": round(history[0], 6),
                "final_loss": round(history[-1], 6)})
