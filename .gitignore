@@ -5,3 +5,5 @@ __pycache__/
 artifacts/
 .idea/
 *.npz
+!data/time-task/model.npz
+web-checkpoints/

@@ -6,6 +6,7 @@ from importlib.resources import files
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .workbench import Workbench
+from .time_task import dataset, convert_model, evaluate
 
 
 def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) -> HTTPServer:
@@ -15,6 +16,14 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
     workbench = Workbench(checkpoint)
 
     class Handler(BaseHTTPRequestHandler):
+        def download(self, body, filename, content_type="application/octet-stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(body)
+
         def setup(self):
             super().setup()
             self.connection.settimeout(10)
@@ -37,6 +46,24 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif self.path == "/app.js":
+                body = files("lob_transformer").joinpath("static/app.js").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/models":
+                self.respond(200, workbench.models())
+            elif self.path == "/time-data":
+                self.respond(200, dataset())
+            elif self.path.startswith("/artifacts/"):
+                try:
+                    _, _, model_id, kind = self.path.split('/')
+                    path = workbench.artifact(model_id, kind)
+                    self.download(path.read_bytes(), path.name)
+                except (ValueError, OSError) as error:
+                    self.respond(404, {"error": str(error)})
             elif self.path == "/health":
                 self.respond(200, workbench.info())
             elif self.path == "/training":
@@ -45,7 +72,7 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                 self.respond(404, {"error": "route not found"})
 
         def do_POST(self):
-            if self.path not in ("/generate", "/train", "/activate"):
+            if self.path not in ("/generate", "/train", "/activate", "/stop", "/select-model", "/upload-model", "/convert-time", "/evaluate"):
                 self.respond(404, {"error": "route not found"})
                 return
             origin = self.headers.get("Origin")
@@ -66,7 +93,7 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                 self.respond(400, {"error": "invalid Content-Length"})
                 return
             length = int(lengths[0])
-            limit = 1048576 if self.path == "/train" else 16384
+            limit = 16 * 1024 * 1024 if self.path in ("/train", "/upload-model") else 16384
             if length > limit:
                 self.respond(413, {"error": f"request body exceeds {limit} bytes"})
                 return
@@ -77,6 +104,31 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                 request = json.loads(body.decode("utf-8"))
                 if not isinstance(request, dict):
                     raise ValueError("request must be a JSON object")
+                if self.path == "/stop":
+                    self.respond(200, workbench.stop())
+                    return
+                if self.path == "/select-model":
+                    self.respond(200, workbench.select(request.get("id")))
+                    return
+                if self.path == "/upload-model":
+                    self.respond(200, workbench.upload(request))
+                    return
+                if self.path == "/convert-time":
+                    if workbench.task != "time":
+                        raise ValueError("请先在模型管理中启用时间转换模型")
+                    answer = convert_model(workbench.model, workbench.tokenizer, request.get("prompt"))
+                    self.respond(200, {"completion": answer, "generated_tokens": 5})
+                    return
+                if self.path == "/evaluate":
+                    model_id = request.get("id")
+                    path = workbench.artifact(model_id, "model")
+                    test_path = workbench.artifact(model_id, "test")
+                    from .checkpoint import load_checkpoint
+                    model, tokenizer = load_checkpoint(path)
+                    rows = [json.loads(line) for line in test_path.read_text().splitlines() if line.strip()]
+                    result = evaluate(model, tokenizer, rows)
+                    self.respond(200, {"test": result, "passed": result["accuracy"] >= .95})
+                    return
                 if self.path == "/train":
                     self.respond(202, workbench.start(request))
                     return
@@ -104,7 +156,7 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
             except TimeoutError:
                 self.respond(408, {"error": "request body timed out"})
                 return
-            except (ValueError, UnicodeError, RecursionError) as error:
+            except (ValueError, UnicodeError, RecursionError, OSError, TypeError) as error:
                 self.respond(400, {"error": str(error)})
                 return
             result = model.generate(ids, tokens)

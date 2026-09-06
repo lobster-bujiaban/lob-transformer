@@ -6,7 +6,8 @@ import numpy as np
 from .attention import CausalSelfAttention, softmax
 from .model import TinyGPT
 from .normalization import LayerNorm
-from .data import TextWindows
+from .data import TextWindows, split_corpus
+from .checkpoint import _parameters
 
 
 def _sgd_step(gradients, learning_rate):
@@ -96,7 +97,7 @@ def _attention_forward(attention: CausalSelfAttention, x: np.ndarray):
     return merged @ attention.output_weight, backward
 
 
-def loss_and_gradients(model: TinyGPT, token_ids, targets):
+def loss_and_gradients(model: TinyGPT, token_ids, targets, *, answer_start=0):
     """Return loss and (parameter, gradient) pairs for every trainable array.
 
     The training forward mirrors inference but retains local backward closures.
@@ -118,7 +119,12 @@ def loss_and_gradients(model: TinyGPT, token_ids, targets):
         tape.append((block, normalized, preactivation, hidden,
                      norm1_backward, attention_backward, norm2_backward))
     x, final_backward = _norm_forward(model.final_norm, x)
-    loss, dlogits = cross_entropy(x @ model.lm_head, targets)
+    logits = x @ model.lm_head
+    if type(answer_start) is not int or not 0 <= answer_start < len(ids):
+        raise ValueError("answer_start must index a predicted token")
+    loss, answer_gradient = cross_entropy(logits[answer_start:], np.asarray(targets)[answer_start:])
+    dlogits = np.zeros_like(logits)
+    dlogits[answer_start:] = answer_gradient
     gradients = [(model.lm_head, x.T @ dlogits)]
     dx, local = final_backward(dlogits @ model.lm_head.T)
     gradients.extend(local)
@@ -181,31 +187,42 @@ def batch_loss_and_gradients(model: TinyGPT, inputs, targets):
 
 
 def train_corpus(model: TinyGPT, token_ids, *, steps=200, learning_rate=0.05,
-                 batch_size=4, seed=7, progress=None):
-    """Random-window SGD; report a fixed training sample, not validation loss."""
+                 batch_size=4, seed=7, progress=None, validation_fraction=0.1):
+    """Evaluate fixed disjoint samples and restore the best validation weights."""
     if type(steps) is not int or steps <= 0:
         raise ValueError("steps must be a positive integer")
     if not np.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError("learning_rate must be finite and positive")
-    windows = TextWindows(token_ids, model.config.context_length, seed)
-    if np.any(windows.ids < 0) or np.any(windows.ids >= model.config.vocab_size):
+    train_ids, val_ids = split_corpus(token_ids, validation_fraction)
+    if np.any(np.asarray(token_ids) < 0) or np.any(np.asarray(token_ids) >= model.config.vocab_size):
         raise ValueError("corpus token ID is outside the vocabulary")
-    # Separate RNG leaves training-window sampling independent of evaluation.
-    evaluation = TextWindows(token_ids, model.config.context_length, seed + 1).sample(batch_size)
+    windows = TextWindows(train_ids, model.config.context_length, seed)
+    evaluations = [TextWindows(ids, model.config.context_length, seed + offset).sample(batch_size)
+                   for ids, offset in ((train_ids, 1), (val_ids, 2))]
+    parameters = _parameters(model)
+    best_loss, best_step, best_weights = float("inf"), 0, None
+    history = []
 
-    def evaluate():
-        return float(np.mean([cross_entropy(model.forward(x), y)[0]
-                              for x, y in zip(*evaluation)]))
+    def evaluate(step):
+        nonlocal best_loss, best_step, best_weights
+        losses = [float(np.mean([cross_entropy(model.forward(x), y)[0]
+                                 for x, y in zip(*sample)])) for sample in evaluations]
+        if losses[1] < best_loss:
+            best_loss, best_step = losses[1], step
+            best_weights = {name: value.copy() for name, value in parameters.items()}
+        row = dict(step=step, train_loss=losses[0], val_loss=losses[1],
+                   best_step=best_step, best_val_loss=best_loss)
+        history.append(row)
+        if progress:
+            progress(**row)
 
-    history = [(0, evaluate())]
-    if progress:
-        progress(*history[-1])
+    evaluate(0)
     for step in range(1, steps + 1):
         inputs, targets = windows.sample(batch_size)
         _, gradients = batch_loss_and_gradients(model, inputs, targets)
         _sgd_step(gradients, learning_rate)
         if step % 10 == 0 or step == steps:
-            history.append((step, evaluate()))
-            if progress:
-                progress(*history[-1])
+            evaluate(step)
+    for name, value in parameters.items():
+        value[...] = best_weights[name]
     return history

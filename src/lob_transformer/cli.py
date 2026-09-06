@@ -38,6 +38,7 @@ def main() -> None:
     source = training.add_mutually_exclusive_group(required=True)
     source.add_argument("--text")
     source.add_argument("--file", help="UTF-8 corpus file; enables random-window mini-batch training")
+    training.add_argument("--validation-fraction", type=float, default=0.1, help="held-out tail fraction for --file (default: 0.1)")
     training.add_argument("--batch-size", type=int, default=4)
     training.add_argument("--context-length", type=int, default=128)
     training.add_argument("--seed", type=int, default=7)
@@ -52,7 +53,25 @@ def main() -> None:
     serving.add_argument("--checkpoint", required=True)
     serving.add_argument("--host", default="127.0.0.1")
     serving.add_argument("--port", type=int, default=8000)
+    time_train = sub.add_parser("train-time", help="train and evaluate Chinese time conversion")
+    time_train.add_argument("--directory", default="data/time-task")
+    time_train.add_argument("--steps", type=int, default=4000)
+    time_convert = sub.add_parser("convert-time", help="convert supported Chinese time using trained weights")
+    time_convert.add_argument("--text", required=True)
+    time_convert.add_argument("--checkpoint", default="data/time-task/model.npz")
     args = parser.parse_args()
+    if args.command in ("train-time", "convert-time"):
+        from .time_task import fit, convert
+        try:
+            if args.command == "train-time":
+                if args.steps <= 0:
+                    raise ValueError("steps must be positive")
+                fit(args.directory, args.steps)
+            else:
+                print(convert(args.checkpoint, args.text))
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        return
     if args.command is None:
         parser.print_help()
         return
@@ -138,16 +157,20 @@ def main() -> None:
             config = ModelConfig(vocab_size=tokenizer.vocab_size, dimensions=args.dimensions,
                                  heads=args.heads, layers=args.layers, context_length=args.context_length)
             model = TinyGPT(config, seed=args.seed)
+            comparison_prompt = prompt_ids[:min(8, config.context_length)]
+            before = tokenizer.decode(model.generate(comparison_prompt, args.tokens))
             if args.file:
                 print({"corpus_tokens": len(prompt_ids), "vocab_size": tokenizer.vocab_size,
-                       "window_length": min(config.context_length, len(prompt_ids) - 1),
+                       "validation_fraction": args.validation_fraction,
                        "batch_size": args.batch_size}, flush=True)
                 samples = train_corpus(
                     model, prompt_ids, steps=args.steps, learning_rate=args.learning_rate,
                     batch_size=args.batch_size, seed=args.seed,
-                    progress=lambda step, loss: print(
-                        {"step": step, "train_sample_loss": round(loss, 6)}, flush=True))
-                history = [loss for _, loss in samples]
+                    validation_fraction=args.validation_fraction,
+                    progress=lambda **row: print(row, flush=True))
+                history = [row["train_loss"] for row in samples]
+                print({"best_step": samples[-1]["best_step"],
+                       "best_val_loss": samples[-1]["best_val_loss"]})
             else:
                 history = train(model, prompt_ids, steps=args.steps, learning_rate=args.learning_rate)
             if args.save:
@@ -156,7 +179,8 @@ def main() -> None:
             parser.error(str(error))
         print({"steps": args.steps, "initial_loss": round(history[0], 6),
                "final_loss": round(history[-1], 6)})
-        print(tokenizer.decode(model.generate(prompt_ids[:1], args.tokens)))
+        print({"prompt": tokenizer.decode(comparison_prompt), "before": before,
+               "after": tokenizer.decode(model.generate(comparison_prompt, args.tokens))})
         return
     config = ModelConfig(vocab_size=tokenizer.vocab_size)
     model = TinyGPT(config)

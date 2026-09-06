@@ -24,3 +24,16 @@ class TextWindows:
         indices = starts[:, None] + np.arange(self.length + 1)
         windows = self.ids[indices]
         return windows[:, :-1], windows[:, 1:]
+
+
+def split_corpus(token_ids, validation_fraction=0.1):
+    """Split contiguous tokens before window sampling; neither side shares positions."""
+    ids = np.asarray(token_ids)
+    if not np.isfinite(validation_fraction) or not 0 < validation_fraction < 1:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    if ids.ndim != 1 or ids.size < 4:
+        raise ValueError("validated corpus training requires at least four tokens")
+    count = max(2, int(ids.size * validation_fraction))
+    if ids.size - count < 2:
+        raise ValueError("split must leave at least two tokens in each set")
+    return ids[:-count], ids[-count:]

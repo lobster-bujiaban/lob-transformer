@@ -1,0 +1,46 @@
+{
+  "seed": 7,
+  "split_seed": 42,
+  "history": [
+    {
+      "step": 100,
+      "train_batch_loss": 0.14762951308802644,
+      "validation_accuracy": 0.8531468531468531
+    },
+    {
+      "step": 200,
+      "train_batch_loss": 0.0181834225512158,
+      "validation_accuracy": 0.951048951048951
+    },
+    {
+      "step": 300,
+      "train_batch_loss": 0.0021512352000763683,
+      "validation_accuracy": 1.0
+    }
+  ],
+  "validation": {
+    "total": 143,
+    "correct": 143,
+    "accuracy": 1.0,
+    "failures": []
+  },
+  "test": {
+    "total": 143,
+    "correct": 141,
+    "accuracy": 0.986013986013986,
+    "failures": [
+      {
+        "input": "下午三点",
+        "output": "15:00",
+        "group": "15:0",
+        "actual": "13:00"
+      },
+      {
+        "input": "晚上十一点",
+        "output": "23:00",
+        "group": "23:0",
+        "actual": "2:3:0"
+      }
+    ]
+  }
+}
