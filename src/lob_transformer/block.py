@@ -29,5 +29,11 @@ class TransformerBlock:
         x = x + self.attention(self.attention_norm(x))
         return x + self.mlp(self.mlp_norm(x))
 
+    def forward_cached(self, vectors: np.ndarray, cache=None):
+        x = np.asarray(vectors)
+        attended, cache = self.attention.forward_cached(self.attention_norm(x), cache)
+        x = x + attended
+        return x + self.mlp(self.mlp_norm(x)), cache
+
     def __call__(self, vectors: np.ndarray) -> np.ndarray:
         return self.forward(vectors)

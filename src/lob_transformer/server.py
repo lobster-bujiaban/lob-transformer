@@ -6,7 +6,9 @@ from importlib.resources import files
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .workbench import Workbench
-from .time_task import dataset, convert_model, evaluate
+from .time_task import dataset, examples, evaluate
+from .inference import timed_generate, benchmark
+import re
 
 
 def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) -> HTTPServer:
@@ -72,7 +74,7 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                 self.respond(404, {"error": "route not found"})
 
         def do_POST(self):
-            if self.path not in ("/generate", "/train", "/activate", "/stop", "/select-model", "/upload-model", "/convert-time", "/evaluate"):
+            if self.path not in ("/generate", "/train", "/activate", "/stop", "/select-model", "/upload-model", "/convert-time", "/evaluate", "/benchmark"):
                 self.respond(404, {"error": "route not found"})
                 return
             origin = self.headers.get("Origin")
@@ -113,12 +115,6 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                 if self.path == "/upload-model":
                     self.respond(200, workbench.upload(request))
                     return
-                if self.path == "/convert-time":
-                    if workbench.task != "time":
-                        raise ValueError("请先在模型管理中启用时间转换模型")
-                    answer = convert_model(workbench.model, workbench.tokenizer, request.get("prompt"))
-                    self.respond(200, {"completion": answer, "generated_tokens": 5})
-                    return
                 if self.path == "/evaluate":
                     model_id = request.get("id")
                     path = workbench.artifact(model_id, "model")
@@ -136,20 +132,38 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
                     self.respond(200, workbench.activate(request.get("id")))
                     return
                 model, tokenizer = workbench.model, workbench.tokenizer
-                if set(request) - {"prompt", "tokens"}:
-                    raise ValueError("only prompt and tokens are supported")
+                if set(request) - {"prompt", "tokens", "use_cache"}:
+                    raise ValueError("only prompt, tokens and use_cache are supported")
                 prompt = request.get("prompt")
                 tokens = request.get("tokens", 16)
                 if not isinstance(prompt, str) or not prompt:
                     raise ValueError("prompt must be a non-empty string")
                 if type(tokens) is not int or not 0 <= tokens <= 256:
                     raise ValueError("tokens must be an integer between 0 and 256")
+                use_cache = request.get("use_cache", True)
+                if type(use_cache) is not bool:
+                    raise ValueError("use_cache must be a boolean")
+                time_task = self.path == "/convert-time" or (self.path == "/benchmark" and workbench.task == "time")
+                if time_task:
+                    if workbench.task != "time":
+                        raise ValueError("请先启用时间转换模型")
+                    if prompt not in {row['input'] for row in examples()}:
+                        raise ValueError("不支持的时间表达，请使用页面列出的中文时间格式")
+                    prompt += "="
+                    tokens = 5
                 ids = tokenizer.encode(prompt)
                 if len(ids) > model.config.context_length:
                     raise ValueError(f"提示词超过 {model.config.context_length} 个字符的上下文限制")
                 if tokenizer.UNK_ID in ids:
                     unknown = "".join(dict.fromkeys(c for c in prompt if c not in tokenizer.stoi))
                     raise ValueError(f"当前词表不包含这些字符：{unknown[:40]}。请先用包含这些字符的语料训练。")
+                if self.path == "/benchmark":
+                    self.respond(200, benchmark(model, tokenizer, ids, tokens))
+                    return
+                result, metrics = timed_generate(model, ids, tokens, use_cache)
+                completion = tokenizer.decode(result[len(ids):])
+                if time_task and not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', completion):
+                    raise ValueError(f"模型未生成有效时间：{completion!r}")
             except RuntimeError as error:
                 self.respond(409, {"error": str(error)})
                 return
@@ -159,9 +173,8 @@ def create_server(checkpoint: str, host: str = "127.0.0.1", port: int = 8000) ->
             except (ValueError, UnicodeError, RecursionError, OSError, TypeError) as error:
                 self.respond(400, {"error": str(error)})
                 return
-            result = model.generate(ids, tokens)
             self.respond(200, {"text": tokenizer.decode(result),
-                               "completion": tokenizer.decode(result[len(ids):]),
+                               "completion": completion, "metrics": metrics,
                                "prompt_tokens": len(ids), "generated_tokens": tokens})
 
     return HTTPServer((host, port), Handler)

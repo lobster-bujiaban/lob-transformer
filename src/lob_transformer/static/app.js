@@ -33,11 +33,11 @@ function showModel(data) {
   $('prompt-label').textContent = activeTask === 'time' ? '中文时间' : '提示词';
   $('test-hint').textContent = activeTask === 'time' ? '输入中文时间，模型输出 HH:MM；无需添加等号。' : '单轮续写 · 历史消息不自动拼接上下文';
   $('scope').textContent = activeTask === 'time' ? '支持上午一至十一点、中午十二点、下午一至六点、晚上七至十一点，搭配整、半或零至五十九分。暂不支持“两点”、日期和凌晨。模型可能出错，请查看测试报告。' : '这是字符级续写模型，词表之外的输入会被拒绝。';
-  $('send').disabled = chatBusy;
+  $('send').disabled = chatBusy; $('benchmark').disabled = chatBusy;
 }
 async function health() {
   try { showModel(await api('/health')); }
-  catch { connected = false; $('connection').textContent = '连接失败，请检查本地服务'; $('send').disabled = true; }
+  catch { connected = false; $('connection').textContent = '连接失败，请检查本地服务'; $('send').disabled = true; $('benchmark').disabled = true; }
 }
 function message(role, text, meta = '') {
   const el = document.createElement('div'); el.className = 'message ' + role;
@@ -55,14 +55,25 @@ $('chat-form').onsubmit = async event => {
   event.preventDefault(); if (chatBusy || !connected) return;
   if (activeTask !== 'time' && !$('tokens').reportValidity()) return;
   const prompt = $('prompt').value; const task = activeTask;
-  chatBusy = true; $('send').disabled = true; $('clear').disabled = true; $('empty')?.remove();
-  message('user', prompt); const pending = message('assistant', '正在生成…'); const start = performance.now();
+  chatBusy = true; $('send').disabled = true; $('benchmark').disabled = true; $('clear').disabled = true; $('empty')?.remove();
+  message('user', prompt); const pending = message('assistant', '正在生成…');
   try {
-    const data = await api(task === 'time' ? '/convert-time' : '/generate', task === 'time' ? {prompt} : {prompt, tokens:Number($('tokens').value)});
-    pending.remove(); message('assistant', data.completion || '（未生成新字符）', `${((performance.now()-start)/1000).toFixed(2)} 秒 · ${task === 'time' ? '模型时间转换' : '单轮续写'}`);
+    const data = await api(task === 'time' ? '/convert-time' : '/generate', task === 'time' ? {prompt, use_cache:$('use-cache').value === 'true'} : {prompt, tokens:Number($('tokens').value), use_cache:$('use-cache').value === 'true'});
+    pending.remove(); message('assistant', data.completion || '（未生成新字符）', `${data.metrics.elapsed_ms.toFixed(2)} ms · ${data.metrics.tokens_per_second.toFixed(1)} 字符/秒 · 缓存${data.metrics.use_cache ? '开启' : '关闭'}`);
     $('prompt').value = '';
   } catch (error) {pending.remove(); message('error', error.message);}
-  finally {chatBusy = false; $('send').disabled = !connected; $('clear').disabled = false;}
+  finally {chatBusy = false; $('send').disabled = !connected; $('benchmark').disabled = !connected; $('clear').disabled = false;}
+};
+$('benchmark').onclick = async () => {
+  if (chatBusy || !connected) return;
+  if (!$('prompt').reportValidity() || (activeTask !== 'time' && !$('tokens').reportValidity())) return;
+  chatBusy = true; $('send').disabled = true; $('benchmark').disabled = true;
+  $('benchmark-result').textContent = '正在比较两种推理方式…';
+  try {
+    const result = await api('/benchmark', {prompt:$('prompt').value, tokens:Number($('tokens').value)});
+    $('benchmark-result').textContent = `输出${result.identical ? '完全一致' : '不一致，请检查'}。关闭：${result.uncached.elapsed_ms.toFixed(2)} ms / ${result.uncached.tokens_per_second.toFixed(1)} 字符/秒；开启：${result.cached.elapsed_ms.toFixed(2)} ms / ${result.cached.tokens_per_second.toFixed(1)} 字符/秒。速度比 ${result.speedup.toFixed(2)}×（大于 1 表示加速）。窗口重建 ${result.window_rebuilds} 次。`;
+  } catch (error) {$('benchmark-result').textContent = error.message;}
+  finally {chatBusy = false; $('send').disabled = !connected; $('benchmark').disabled = !connected;}
 };
 function mode() {
   const time = $('task').value === 'time';

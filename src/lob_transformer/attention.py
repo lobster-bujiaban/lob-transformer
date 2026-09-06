@@ -73,6 +73,28 @@ class CausalSelfAttention:
             return output, attention_weights
         return output
 
+    def forward_cached(self, vectors: np.ndarray, cache=None):
+        """Append a chunk to request-local, already rotated K and raw V."""
+        values = np.asarray(vectors)
+        if values.ndim != 2 or values.shape[1] != self.dimensions or not len(values):
+            raise ValueError("vectors must have non-empty [tokens, dimensions] shape")
+        length = len(values)
+        offset = 0 if cache is None else cache[0].shape[1]
+        positions = np.arange(offset, offset + length)
+        query = self.rope(self._split_heads(values @ self.query_weight), positions)
+        key = self.rope(self._split_heads(values @ self.key_weight), positions)
+        value = self._split_heads(values @ self.value_weight)
+        if cache is not None:
+            key = np.concatenate((cache[0], key), axis=1)
+            value = np.concatenate((cache[1], value), axis=1)
+        scores = query @ key.transpose(0, 2, 1) / np.sqrt(self.head_size)
+        # Chunked prefill must not expose later tokens within the new chunk.
+        future = np.arange(offset + length)[None, :] > positions[:, None]
+        weights = softmax(np.where(future, -np.inf, scores))
+        attended = weights @ value
+        merged = attended.transpose(1, 0, 2).reshape(length, self.dimensions)
+        return merged @ self.output_weight, (key, value)
+
     def _split_heads(self, vectors: np.ndarray) -> np.ndarray:
         length = vectors.shape[0]
         return vectors.reshape(length, self.heads, self.head_size).transpose(1, 0, 2)

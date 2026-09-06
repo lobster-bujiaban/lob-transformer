@@ -49,9 +49,38 @@ class TinyGPT:
             x = layer(x)
         return self.final_norm(x) @ self.lm_head
 
-    def generate(self, token_ids: list[int], count: int) -> list[int]:
+    def _forward_cached(self, token_ids, caches=None):
+        """Incremental forward; cache ownership stays with the generation request."""
+        ids = np.asarray(token_ids)
+        offset = 0 if caches is None else caches[0][0].shape[1]
+        if ids.ndim != 1 or not 0 < len(ids) <= self.config.context_length - offset:
+            raise ValueError("cached tokens must fit the context length")
+        x = self.token_embedding(ids)
+        updated = []
+        for index, layer in enumerate(self.layers):
+            x, cache = layer.forward_cached(x, None if caches is None else caches[index])
+            updated.append(cache)
+        return self.final_norm(x) @ self.lm_head, updated
+
+    def generate(self, token_ids: list[int], count: int, *, use_cache: bool = False) -> list[int]:
+        if type(count) is not int or count < 0:
+            raise ValueError("count must be a non-negative integer")
+        if type(use_cache) is not bool:
+            raise ValueError("use_cache must be a boolean")
         result = list(token_ids)
+        if not result:
+            raise ValueError("prompt must not be empty")
+        # Validate even for zero-token requests. Long prompts retain the original sliding window.
+        self.token_embedding(np.asarray(result))
+        caches = None
         for _ in range(count):
-            logits = self.forward(result[-self.config.context_length:])
+            if not use_cache:
+                logits = self.forward(result[-self.config.context_length:])
+            elif caches is None or caches[0][0].shape[1] >= self.config.context_length:
+                # Dropping an old token changes retained tokens' deeper-layer states.
+                # Rebuild with positions starting at zero to match uncached sliding-window inference.
+                logits, caches = self._forward_cached(result[-self.config.context_length:])
+            else:
+                logits, caches = self._forward_cached(result[-1:], caches)
             result.append(int(np.argmax(logits[-1])))
         return result

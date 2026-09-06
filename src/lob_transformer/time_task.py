@@ -47,12 +47,12 @@ def dataset(seed=42):
             for split in ('train', 'validation', 'test')}
 
 
-def predict(model, tokenizer, text):
+def predict(model, tokenizer, text, *, use_cache=False):
     prompt = text + '='
     ids = tokenizer.encode(prompt)
     if tokenizer.UNK_ID in ids:
         raise ValueError('时间表达包含模型词表之外的字符')
-    return tokenizer.decode(model.generate(ids, 5)[len(ids):])
+    return tokenizer.decode(model.generate(ids, 5, use_cache=use_cache)[len(ids):])
 
 
 def evaluate(model, tokenizer, rows):
@@ -174,11 +174,11 @@ def fit(directory, steps=4000, *, splits=None, progress=None, cancelled=None):
     return model, tokenizer, report
 
 
-def convert_model(model, tokenizer, text):
+def convert_model(model, tokenizer, text, *, use_cache=False):
     # Membership validates supported grammar only; the answer always comes from weights.
     if not isinstance(text, str) or text not in {r['input'] for r in examples()}:
         raise ValueError('不支持的时间表达；请使用上午一至十一点、中午十二点、下午一至六点、晚上七至十一点，搭配整/半/零至五十九分')
-    answer = predict(model,tokenizer,text)
+    answer = predict(model,tokenizer,text,use_cache=use_cache)
     if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]',answer):
         raise ValueError(f'模型未生成有效时间：{answer!r}')
     return answer
