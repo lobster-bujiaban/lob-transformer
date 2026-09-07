@@ -7,3 +7,4 @@ artifacts/
 *.npz
 !data/time-task/model.npz
 web-checkpoints/
+videos/
